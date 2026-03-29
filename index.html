@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Interactive Visitor Journey</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- HTML5 QR Code Scanner -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <!-- HTML2Canvas for Screenshots -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <style>
+        @keyframes scan {
+            0% { transform: translateY(-100%); opacity: 0; }
+            50% { opacity: 1; }
+            100% { transform: translateY(200px); opacity: 0; }
+        }
+        @keyframes fall {
+            0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+            100% { transform: translateY(400px) rotate(360deg); opacity: 0; }
+        }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .animate-scan { animation: scan 2s ease-in-out infinite; }
+        .animate-fall-1 { animation: fall 3s ease-in-out infinite; }
+        .animate-fall-2 { animation: fall 2.5s ease-in-out infinite 0.5s; }
+        .animate-fall-3 { animation: fall 2s ease-in-out infinite 1s; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans overflow-hidden">
+
+    <div id="app"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // =========================================================================
+        // ⚙️ EVENT CONFIGURATION
+        // =========================================================================
+        
+        // 1. Set how many QR codes are active for this specific event (Max 10)
+        window.ACTIVE_QR_COUNT = 6; 
+
+        // 2. Set the display names for your exhibits
+        const EXHIBIT_NAMES = [
+            "Space Station",       // Exhibit 1
+            "Mars Rover Lab",      // Exhibit 2
+            "Moon Base Alpha",     // Exhibit 3
+            "Asteroid Mining",     // Exhibit 4
+            "Galaxy Hub",          // Exhibit 5
+            "Nebula Lounge",       // Exhibit 6
+            "Comet Cafe",          // Exhibit 7
+            "Stellar VR Demo",     // Exhibit 8
+            "Black Hole Info",     // Exhibit 9
+            "Supernova Stage"      // Exhibit 10
+        ];
+
+        // 3. Set the hidden, unique string codes that will be encoded inside the physical QR codes
+        const UNIQUE_QR_CODES = [
+            "qr_code_001_space",
+            "qr_code_002_mars",
+            "qr_code_003_moon",
+            "qr_code_004_asteroid",
+            "qr_code_005_galaxy",
+            "qr_code_006_nebula",
+            "qr_code_007_comet",
+            "qr_code_008_stellar",
+            "qr_code_009_blackhole",
+            "qr_code_010_supernova"
+        ];
+
+        // Build the active exhibits list based on the count
+        window.activeExhibits = [];
+        for (let i = 0; i < window.ACTIVE_QR_COUNT && i < 10; i++) {
+            window.activeExhibits.push({
+                id: UNIQUE_QR_CODES[i],
+                name: EXHIBIT_NAMES[i]
+            });
+        }
+
+        // =========================================================================
+        // 🔥 FIREBASE & STATE MANAGEMENT
+        // =========================================================================
+
+        let db, auth, appId, currentUserUid;
+        let unsubscribeScans = null;
+        let html5QrCode = null; // Holds the camera instance
+
+        // Application State
+        window.state = {
+            user: null, // { name, phone, rewardUnlocked, luckyNumber }
+            scans: [], // array of scanned QR string IDs
+            activeTab: 'passport',
+            showRewardModal: false,
+            justScanned: null,
+            loading: true
+        };
+
+        async function initApp() {
+            try {
+                // 👇 REPLACE THIS OBJECT WITH YOUR REAL FIREBASE CONFIG 👇
+                const myFirebaseConfig = {
+                    apiKey: "AIzaSyAQyif9D9lDhvCxY7iBZ2lEf8iqHrCWk-E",
+					authDomain: "digipassport.firebaseapp.com",
+					projectId: "digipassport",
+					storageBucket: "digipassport.firebasestorage.app",
+					messagingSenderId: "111979655077",
+					appId: "1:111979655077:web:5e20fdbf0252c19c78424c"
+                };
+                
+                // This checks if we are in the AI preview environment or your real host
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : myFirebaseConfig;
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'my-event-app-id';
+                
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Authenticaton
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUserUid = user.uid;
+                        await fetchUserProfile();
+                    } else {
+                        currentUserUid = null;
+                        window.state.user = null;
+                        window.state.scans = [];
+                        window.state.loading = false;
+                        render();
+                    }
+                });
+            } catch (error) {
+                console.error("Initialization Error:", error);
+                window.state.loading = false;
+                render();
+            }
+        }
+
+        async function fetchUserProfile() {
+            if (!currentUserUid) return;
+            try {
+                const profileRef = doc(db, 'artifacts', appId, 'users', currentUserUid, 'profile', 'info');
+                const profileSnap = await getDoc(profileRef);
+                
+                if (profileSnap.exists()) {
+                    window.state.user = profileSnap.data();
+                    setupScansListener();
+                } else {
+                    window.state.user = null;
+                    window.state.loading = false;
+                    render();
+                }
+            } catch (error) {
+                console.error("Error fetching profile:", error);
+                window.state.loading = false;
+                render();
+            }
+        }
+
+        function setupScansListener() {
+            if (!currentUserUid || unsubscribeScans) return;
+            
+            const scansRef = doc(db, 'artifacts', appId, 'users', currentUserUid, 'passport', 'scans');
+            
+            unsubscribeScans = onSnapshot(scansRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    window.state.scans = docSnap.data().scannedIds || [];
+                    checkCompletion(docSnap.data().rewardUnlocked);
+                } else {
+                    window.state.scans = [];
+                }
+                window.state.loading = false;
+                render();
+            }, (error) => {
+                console.error("Scans listener error:", error);
+            });
+        }
+
+        function checkCompletion(rewardUnlockedAlready) {
+            const isCompleted = window.state.scans.length >= window.ACTIVE_QR_COUNT;
+            
+            if (isCompleted && window.state.user && !rewardUnlockedAlready) {
+                setTimeout(() => {
+                    window.state.showRewardModal = true;
+                    // Generate unique ticket number
+                    const luckyNumber = Math.floor(100000 + Math.random() * 900000);
+                    
+                    // 1. Save reward status to the user's passport
+                    setDoc(doc(db, 'artifacts', appId, 'users', currentUserUid, 'passport', 'scans'), 
+                        { rewardUnlocked: true, luckyNumber: luckyNumber }, { merge: true });
+                    
+                    // 2. SAVE TO PUBLIC DRAW COLLECTION (For organizers to easily pick winners)
+                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'draw_entries', currentUserUid), {
+                        name: window.state.user.name,
+                        phone: window.state.user.phone,
+                        luckyNumber: luckyNumber,
+                        timestamp: new Date().toISOString()
+                    });
+
+                    window.state.user.rewardUnlocked = true;
+                    window.state.user.luckyNumber = luckyNumber;
+                    render();
+                }, 500);
+            }
+        }
+
+        // =========================================================================
+        // 🎮 APP LOGIC
+        // =========================================================================
+
+        window.handleLogin = async (event) => {
+            event.preventDefault();
+            const form = event.target;
+            const name = form.name.value;
+            const phone = form.phone.value;
+            
+            if (!name || !phone || !currentUserUid) return;
+
+            window.state.loading = true;
+            render();
+
+            try {
+                // Save user info
+                const profileRef = doc(db, 'artifacts', appId, 'users', currentUserUid, 'profile', 'info');
+                await setDoc(profileRef, { name, phone });
+                
+                // Initialize passport tracking
+                const scansRef = doc(db, 'artifacts', appId, 'users', currentUserUid, 'passport', 'scans');
+                await setDoc(scansRef, { scannedIds: [], rewardUnlocked: false });
+                
+                window.state.user = { name, phone, rewardUnlocked: false };
+                window.state.activeTab = 'passport';
+                
+                setupScansListener();
+            } catch (error) {
+                console.error("Login failed:", error);
+                window.state.loading = false;
+                render();
+            }
+        };
+
+        window.handleLogout = async () => {
+            if (unsubscribeScans) unsubscribeScans();
+            unsubscribeScans = null;
+            await stopScanner(); // Make sure camera turns off on logout
+            window.state.user = null;
+            window.state.scans = [];
+            window.state.activeTab = 'passport';
+            
+            // Delete the profile locally for testing purposes. 
+            // In a real app, you might just sign out.
+            await signOut(auth);
+            await initApp(); // Re-authenticate anonymously
+        };
+
+        window.switchTab = async (tab) => {
+            // Stop scanner if leaving scanner tab
+            if (window.state.activeTab === 'scanner' && tab !== 'scanner') {
+                await stopScanner();
+            }
+            
+            window.state.activeTab = tab;
+            render();
+
+            // Start scanner if entering scanner tab
+            if (tab === 'scanner') {
+                setTimeout(startScanner, 100); // Give DOM time to render the reader div
+            }
+        };
+
+        window.closeModal = () => {
+            window.state.showRewardModal = false;
+            render();
+        };
+
+        window.downloadTicket = async () => {
+            const ticketElement = document.getElementById('reward-ticket-capture');
+            const downloadBtn = document.getElementById('download-btn');
+            const originalText = downloadBtn.innerHTML;
+            
+            // Show loading state
+            downloadBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Saving...';
+            downloadBtn.disabled = true;
+            
+            try {
+                // Capture the specific ticket div
+                const canvas = await html2canvas(ticketElement, {
+                    backgroundColor: '#0f172a', // Matches Tailwind slate-900 background
+                    scale: 2 // Higher resolution for better quality
+                });
+                
+                // Convert to image and trigger download
+                const image = canvas.toDataURL("image/png");
+                const link = document.createElement('a');
+                link.download = `Event-Ticket-${window.state.user.luckyNumber}.png`;
+                link.href = image;
+                link.click();
+            } catch(e) {
+                console.error("Screenshot failed:", e);
+                alert("Failed to save the ticket. You can still take a normal screenshot!");
+            }
+            
+            // Restore button
+            downloadBtn.innerHTML = originalText;
+            downloadBtn.disabled = false;
+        };
+
+        window.simulateScan = async (exhibitId) => {
+            if (!currentUserUid || window.state.scans.includes(exhibitId)) return;
+            
+            const scannedExhibit = window.activeExhibits.find(e => e.id === exhibitId);
+            if (!scannedExhibit) {
+                // Not a valid QR code for this event
+                alert("Unrecognized QR code.");
+                setTimeout(startScanner, 1500); // Resume scanning
+                return;
+            }
+
+            // Valid scan! Stop the camera to prevent double-scanning
+            await stopScanner();
+
+            window.state.justScanned = scannedExhibit.name;
+            render(); // show success screen immediately
+
+            try {
+                const newScans = [...window.state.scans, exhibitId];
+                const scansRef = doc(db, 'artifacts', appId, 'users', currentUserUid, 'passport', 'scans');
+                await setDoc(scansRef, { scannedIds: newScans }, { merge: true });
+            } catch (error) {
+                console.error("Scan error:", error);
+            }
+
+            setTimeout(() => {
+                window.state.justScanned = null;
+                const progress = Math.round((window.state.scans.length / window.ACTIVE_QR_COUNT) * 100);
+                if (progress < 100) {
+                    window.state.activeTab = 'passport';
+                }
+                render();
+            }, 2000);
+        };
+
+        // =========================================================================
+        // 📷 CAMERA SCANNER LOGIC
+        // =========================================================================
+        
+        async function startScanner() {
+            if (html5QrCode) return;
+            try {
+                html5QrCode = new Html5Qrcode("reader");
+                const config = { fps: 10, qrbox: { width: 200, height: 200 }, aspectRatio: 1.0 };
+                
+                await html5QrCode.start(
+                    { facingMode: "environment" }, // Prioritize back camera
+                    config, 
+                    (decodedText) => {
+                        // Success callback: A QR code was found!
+                        window.simulateScan(decodedText);
+                    },
+                    (errorMessage) => {
+                        // Expected: it throws warnings continuously until a QR is in frame.
+                    }
+                );
+            } catch (err) {
+                console.error("Camera start error:", err);
+                const readerDiv = document.getElementById("reader");
+                if (readerDiv) readerDiv.innerHTML = `<div class="flex h-full items-center justify-center p-4 text-center text-red-400 text-sm">Camera access denied or unavailable. Please check permissions.</div>`;
+            }
+        }
+
+        async function stopScanner() {
+            if (html5QrCode) {
+                try {
+                    await html5QrCode.stop();
+                    html5QrCode.clear();
+                    html5QrCode = null;
+                } catch (err) {
+                    console.error("Error stopping scanner:", err);
+                }
+            }
+        }
+
+        // =========================================================================
+        // 🎨 RENDERING VIEWS
+        // =========================================================================
+
+        function renderLoginView() {
+            return `
+            <div class="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4 font-sans text-slate-100 relative">
+                <div class="bg-slate-800 p-8 rounded-3xl shadow-2xl w-full max-w-md border border-slate-700 z-10">
+                    <div class="flex justify-center mb-6">
+                        <div class="bg-slate-700 p-2 rounded-2xl shadow-lg flex items-center justify-center w-24 h-24 overflow-hidden border border-slate-600">
+                            <!-- Main App Logo Placeholder -->
+                            <img src="/assets/logo.png" alt="Event Logo" class="w-full h-full object-contain"
+                                onerror="this.onerror=null; this.outerHTML='<div class=\\'text-blue-400 font-bold text-sm text-center\\'>LOGO<br/>HERE</div>';"
+                            />
+                        </div>
+                    </div>
+                    <h1 class="text-3xl font-bold text-center mb-2 bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
+                        Interactive Visitor Journey
+                    </h1>
+                    <p class="text-slate-400 text-center mb-8">
+                        Register to explore exhibits, collect stamps, and win exclusive prizes!
+                    </p>
+                    
+                    <form onsubmit="handleLogin(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Full Name</label>
+                            <input type="text" name="name" required placeholder="John Doe"
+                                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                            />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-400 mb-1">Mobile Number</label>
+                            <input type="tel" name="phone" required placeholder="+1 (555) 000-0000"
+                                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                            />
+                        </div>
+                        <button type="submit" 
+                            class="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-semibold rounded-xl px-4 py-4 mt-4 transition-all shadow-lg shadow-blue-600/20 active:scale-[0.98]">
+                            Start Exploring
+                        </button>
+                        <p class="text-xs text-slate-500 text-center mt-4">
+                            No app download required. By continuing, you agree to the event terms.
+                        </p>
+                    </form>
+                </div>
+
+                <!-- Powered By Section -->
+                <div class="mt-10 flex flex-col items-center justify-center opacity-70 hover:opacity-100 transition-opacity">
+                    <span class="text-[10px] text-slate-500 mb-2 uppercase tracking-[0.2em] font-semibold">Powered By</span>
+                    <img src="/assets/powered-by.png" alt="Powered By Logo" class="h-8 object-contain"
+                        onerror="this.onerror=null; this.outerHTML='<div class=\\'text-slate-400 font-bold text-sm tracking-widest border border-slate-600 px-4 py-1 rounded\\'>YOUR COMPANY</div>';"
+                    />
+                </div>
+            </div>
+            `;
+        }
+
+        function renderMainAppView() {
+            const { user, scans, activeTab, justScanned, showRewardModal } = window.state;
+            const progress = window.ACTIVE_QR_COUNT > 0 ? Math.round((scans.length / window.ACTIVE_QR_COUNT) * 100) : 0;
+            const isCompleted = progress === 100;
+            const luckyNumber = user.luckyNumber || Math.floor(100000 + Math.random() * 900000);
+
+            // Tab Content Generators
+            let mainContent = '';
+
+            // --- PASSPORT TAB ---
+            if (activeTab === 'passport') {
+                const exhibitsHtml = window.activeExhibits.map(exhibit => {
+                    const scanned = scans.includes(exhibit.id);
+                    return `
+                    <div class="relative p-4 rounded-2xl border transition-all duration-300 flex flex-col items-center justify-center text-center h-32
+                        ${scanned ? 'bg-blue-900/20 border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.1)]' : 'bg-slate-800/50 border-slate-700 border-dashed opacity-70 grayscale'}">
+                        ${scanned ? `
+                        <div class="absolute -top-2 -right-2 bg-emerald-500 text-slate-900 rounded-full p-1 shadow-lg">
+                            <i class="fa-solid fa-check-circle text-sm text-slate-900"></i>
+                        </div>` : ''}
+                        
+                        <div class="p-3 rounded-full mb-2 ${scanned ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-500'} text-xl">
+                            ${scanned ? '<i class="fa-solid fa-ticket"></i>' : '<i class="fa-solid fa-qrcode"></i>'}
+                        </div>
+                        <span class="text-sm font-semibold ${scanned ? 'text-white' : 'text-slate-400'}">
+                            ${exhibit.name}
+                        </span>
+                    </div>`;
+                }).join('');
+
+                mainContent = `
+                <div class="space-y-6 animate-[fadeIn_300ms_ease-in]">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-lg font-bold flex items-center gap-2">
+                            <i class="fa-solid fa-map text-blue-400"></i> Your Destinations
+                        </h3>
+                        <span class="text-xs bg-slate-800 px-2 py-1 rounded-full text-slate-300 border border-slate-700">
+                            ${scans.length} / ${window.ACTIVE_QR_COUNT} Scanned
+                        </span>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        ${exhibitsHtml}
+                    </div>
+
+                    ${isCompleted ? `
+                    <div class="mt-8 bg-gradient-to-r from-emerald-500/20 to-blue-500/20 border border-emerald-500/30 rounded-2xl p-6 text-center shadow-lg relative overflow-hidden">
+                        <div class="absolute -top-10 -left-10 w-32 h-32 bg-emerald-500/20 blur-3xl rounded-full"></div>
+                        <div class="absolute -bottom-10 -right-10 w-32 h-32 bg-blue-500/20 blur-3xl rounded-full"></div>
+                        <i class="fa-solid fa-trophy text-4xl text-yellow-400 mb-3"></i>
+                        <h3 class="text-xl font-bold text-white mb-2">Passport Complete!</h3>
+                        <p class="text-sm text-slate-300 mb-4">You've successfully entered the exclusive prize draw.</p>
+                        <button onclick="window.state.showRewardModal=true; render();" class="bg-white text-slate-900 font-bold px-6 py-2 rounded-full text-sm hover:scale-105 transition-transform">
+                            View Reward Ticket
+                        </button>
+                    </div>
+                    ` : ''}
+                </div>`;
+            }
+
+            // --- SCANNER TAB ---
+            else if (activeTab === 'scanner') {
+                if (justScanned) {
+                    mainContent = `
+                    <div class="h-full flex flex-col items-center justify-center space-y-8 text-center">
+                        <div class="w-24 h-24 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto animate-bounce">
+                            <i class="fa-solid fa-check-circle text-5xl text-emerald-400"></i>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white">Success!</h3>
+                        <p class="text-slate-400">You scanned <span class="text-emerald-400 font-semibold">${justScanned}</span>.</p>
+                    </div>`;
+                } else {
+                    mainContent = `
+                    <div class="h-full flex flex-col items-center justify-center space-y-6">
+                        <div class="text-center space-y-2">
+                            <h3 class="text-2xl font-bold text-white">Scan QR Code</h3>
+                            <p class="text-slate-400 text-sm max-w-[250px] mx-auto">
+                                Point your camera at the exhibit's QR code to collect a stamp.
+                            </p>
+                        </div>
+                        
+                        <!-- Real Camera Viewfinder -->
+                        <div class="relative w-72 h-72 bg-slate-950 rounded-3xl border border-slate-700 overflow-hidden flex items-center justify-center shadow-[0_0_30px_rgba(0,0,0,0.5)]">
+                            
+                            <!-- The div where the camera video gets injected -->
+                            <div id="reader" class="w-full h-full object-cover"></div>
+                            
+                            <!-- Scanner Overlay Graphics -->
+                            <div class="absolute inset-0 pointer-events-none border-[30px] border-slate-900/50 z-10"></div>
+                            <div class="absolute top-0 left-0 w-full h-full opacity-40 pointer-events-none z-20">
+                                <div class="w-full h-1 bg-emerald-500 animate-scan drop-shadow-[0_0_8px_rgba(16,185,129,1)]"></div>
+                            </div>
+                            
+                            <!-- Corner markers -->
+                            <div class="absolute top-6 left-6 w-8 h-8 border-t-4 border-l-4 border-emerald-500 z-20"></div>
+                            <div class="absolute top-6 right-6 w-8 h-8 border-t-4 border-r-4 border-emerald-500 z-20"></div>
+                            <div class="absolute bottom-6 left-6 w-8 h-8 border-b-4 border-l-4 border-emerald-500 z-20"></div>
+                            <div class="absolute bottom-6 right-6 w-8 h-8 border-b-4 border-r-4 border-emerald-500 z-20"></div>
+                        </div>
+                    </div>`;
+                }
+            }
+
+            // --- PROFILE TAB ---
+            else if (activeTab === 'profile') {
+                mainContent = `
+                <div class="space-y-6">
+                    <div class="bg-slate-800 rounded-3xl p-6 text-center border border-slate-700 relative overflow-hidden">
+                        <div class="w-20 h-20 bg-slate-700 rounded-full mx-auto flex items-center justify-center mb-4 border-4 border-slate-800 shadow-xl">
+                            <i class="fa-solid fa-user text-3xl text-blue-400"></i>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white mb-1">${user.name}</h3>
+                        <p class="text-slate-400 text-sm">${user.phone}</p>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div class="bg-slate-800/50 rounded-2xl p-4 border border-slate-700 flex justify-between items-center">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-blue-500/20 rounded-xl">
+                                    <i class="fa-solid fa-ticket text-xl text-blue-400"></i>
+                                </div>
+                                <div>
+                                    <p class="text-white font-medium">Event Passes</p>
+                                    <p class="text-xs text-slate-400">1 General Admission</p>
+                                </div>
+                            </div>
+                            <i class="fa-solid fa-chevron-right text-slate-600"></i>
+                        </div>
+
+                        <div class="bg-slate-800/50 rounded-2xl p-4 border border-slate-700 flex justify-between items-center">
+                            <div class="flex items-center gap-3">
+                                <div class="p-2 bg-purple-500/20 rounded-xl">
+                                    <i class="fa-solid fa-gift text-xl text-purple-400"></i>
+                                </div>
+                                <div>
+                                    <p class="text-white font-medium">Rewards Status</p>
+                                    <p class="text-xs text-slate-400">${isCompleted ? 'Draw Entered' : `${window.ACTIVE_QR_COUNT - scans.length} stamps remaining`}</p>
+                                </div>
+                            </div>
+                            <i class="fa-solid fa-chevron-right text-slate-600"></i>
+                        </div>
+                    </div>
+
+                    <button onclick="handleLogout()" class="w-full mt-8 py-4 flex items-center justify-center gap-2 text-red-400 font-semibold bg-red-400/10 rounded-2xl hover:bg-red-400/20 transition-colors">
+                        <i class="fa-solid fa-arrow-right-from-bracket"></i> Leave Event
+                    </button>
+                </div>`;
+            }
+
+            return `
+            <div class="min-h-screen bg-slate-900 text-slate-100 flex justify-center font-sans overflow-hidden">
+                <div class="w-full max-w-md bg-slate-900 h-[100dvh] flex flex-col relative shadow-2xl overflow-hidden border-x border-slate-800">
+                    
+                    <!-- Header -->
+                    <header class="px-6 pt-8 pb-4 bg-slate-800/50 backdrop-blur-md border-b border-slate-800 z-10">
+                        <div class="flex justify-between items-center mb-4">
+                            <div>
+                                <p class="text-sm text-slate-400">Welcome back,</p>
+                                <h2 class="text-xl font-bold text-white truncate max-w-[200px]">${user.name}</h2>
+                            </div>
+                            <div class="bg-slate-800 p-2 rounded-full border border-slate-700 relative">
+                                <i class="fa-solid fa-user text-xl text-blue-400"></i>
+                                ${isCompleted ? '<span class="absolute top-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-slate-800 rounded-full"></span>' : ''}
+                            </div>
+                        </div>
+                        
+                        <!-- Progress Bar -->
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-sm">
+                                <span class="text-slate-400 font-medium">Passport Progress</span>
+                                <span class="text-blue-400 font-bold">${progress}%</span>
+                            </div>
+                            <div class="h-3 w-full bg-slate-800 rounded-full overflow-hidden border border-slate-700">
+                                <div class="h-full bg-gradient-to-r from-blue-500 to-emerald-400 transition-all duration-1000 ease-out" style="width: ${progress}%"></div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <!-- Main Content -->
+                    <main class="flex-1 overflow-y-auto pb-24 px-6 pt-6 scrollbar-hide">
+                        ${mainContent}
+                    </main>
+
+                    <!-- Bottom Nav -->
+                    <nav class="absolute bottom-0 w-full bg-slate-800/90 backdrop-blur-xl border-t border-slate-700 px-6 py-4 pb-8 flex justify-between items-center z-20">
+                        <button onclick="switchTab('passport')" class="flex flex-col items-center space-y-1 w-16 transition-colors ${activeTab === 'passport' ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}">
+                            <i class="fa-solid fa-map text-2xl ${activeTab === 'passport' ? 'drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]' : ''}"></i>
+                            <span class="text-[10px] font-medium">Passport</span>
+                        </button>
+                        
+                        <button onclick="switchTab('scanner')" class="relative -top-6 flex flex-col items-center">
+                            <div class="p-4 rounded-full shadow-xl transition-transform active:scale-95 ${activeTab === 'scanner' ? 'bg-blue-500 shadow-blue-500/40' : 'bg-gradient-to-br from-slate-700 to-slate-800 border border-slate-600 text-white'}">
+                                <i class="fa-solid fa-qrcode text-2xl text-white"></i>
+                            </div>
+                            <span class="text-[10px] font-medium mt-2 ${activeTab === 'scanner' ? 'text-blue-400' : 'text-slate-500'}">Scan</span>
+                        </button>
+
+                        <button onclick="switchTab('profile')" class="flex flex-col items-center space-y-1 w-16 transition-colors ${activeTab === 'profile' ? 'text-blue-400' : 'text-slate-500 hover:text-slate-300'}">
+                            <i class="fa-solid fa-user text-2xl ${activeTab === 'profile' ? 'drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]' : ''}"></i>
+                            <span class="text-[10px] font-medium">Profile</span>
+                        </button>
+                    </nav>
+
+                    <!-- Reward Modal -->
+                    ${showRewardModal ? `
+                    <div class="absolute inset-0 z-50 bg-slate-900/90 backdrop-blur-sm flex items-center justify-center p-6">
+                        <div class="bg-gradient-to-b from-slate-800 to-slate-900 border border-slate-700 w-full max-w-sm rounded-3xl p-6 text-center shadow-2xl relative overflow-hidden flex flex-col items-center">
+                            
+                            <!-- The area that will be captured for the screenshot -->
+                            <div id="reward-ticket-capture" class="w-full relative p-6 bg-gradient-to-b from-slate-800 to-slate-900 rounded-2xl flex flex-col items-center">
+                                <!-- Confetti -->
+                                <div class="absolute top-0 left-1/4 w-2 h-2 bg-blue-500 rounded-full animate-fall-1"></div>
+                                <div class="absolute top-0 right-1/4 w-2 h-2 bg-yellow-500 rounded-full animate-fall-2"></div>
+                                <div class="absolute top-0 left-1/2 w-2 h-2 bg-emerald-500 rounded-full animate-fall-3"></div>
+                                
+                                <div class="w-24 h-24 bg-gradient-to-br from-yellow-400 to-amber-600 rounded-full mx-auto flex items-center justify-center shadow-[0_0_40px_rgba(251,191,36,0.4)] mb-6 border-4 border-slate-800 relative z-10">
+                                    <i class="fa-solid fa-gift text-4xl text-slate-900"></i>
+                                </div>
+                                
+                                <h2 class="text-3xl font-extrabold text-white mb-2 tracking-tight">Congratulations!</h2>
+                                <p class="text-slate-300 mb-6 leading-relaxed">
+                                    You've successfully explored all exhibits. You have been officially entered into the <strong class="text-yellow-400">Grand Prize Draw</strong>!
+                                </p>
+                                
+                                <div class="bg-slate-950 p-4 w-full rounded-xl border border-slate-800 mb-2 border-dashed">
+                                    <p class="text-xs text-slate-500 uppercase tracking-wider mb-1">Your Lucky Ticket Number</p>
+                                    <p class="text-3xl font-mono font-bold text-white tracking-widest">
+                                        #${luckyNumber}
+                                    </p>
+                                    <p class="text-[10px] text-slate-600 mt-2 uppercase font-semibold">Participant: ${user.name}</p>
+                                </div>
+                            </div>
+
+                            <!-- Buttons -->
+                            <div class="w-full space-y-3 mt-4">
+                                <button id="download-btn" onclick="downloadTicket()" class="w-full bg-emerald-500 text-slate-900 font-bold py-4 rounded-xl hover:bg-emerald-400 transition-colors shadow-lg active:scale-95 flex items-center justify-center gap-2">
+                                    <i class="fa-solid fa-download"></i> Save Ticket to Photos
+                                </button>
+                                <button onclick="closeModal()" class="w-full bg-slate-700 text-white font-bold py-4 rounded-xl hover:bg-slate-600 transition-colors shadow-lg active:scale-95">
+                                    Return to Passport
+                                </button>
+                            </div>
+                        </div>
+                    </div>` : ''}
+                </div>
+            </div>`;
+        }
+
+        // =========================================================================
+        // 🔄 RENDER LOOP
+        // =========================================================================
+
+        window.render = () => {
+            const app = document.getElementById('app');
+            
+            if (window.state.loading) {
+                app.innerHTML = `<div class="min-h-screen bg-slate-900 flex items-center justify-center"><i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500"></i></div>`;
+                return;
+            }
+
+            if (!window.state.user) {
+                app.innerHTML = renderLoginView();
+            } else {
+                app.innerHTML = renderMainAppView();
+            }
+        };
+
+        // Boot
+        initApp();
+
+    </script>
+</body>
+</html>
