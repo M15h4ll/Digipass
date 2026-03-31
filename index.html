@@ -105,20 +105,20 @@
         async function initApp() {
             try {
                 // 👇 REPLACE THIS OBJECT WITH YOUR REAL FIREBASE CONFIG 👇
-const firebaseConfig = {
-  apiKey: "AIzaSyAQyif9D9lDhvCxY7iBZ2lEf8iqHrCWk-E",
-  authDomain: "digipassport.firebaseapp.com",
-  projectId: "digipassport",
-  storageBucket: "digipassport.firebasestorage.app",
-  messagingSenderId: "111979655077",
-  appId: "1:111979655077:web:5e20fdbf0252c19c78424c"
-};
+                const myFirebaseConfig = {
+                    apiKey: "AIzaSyAQyif9D9lDhvCxY7iBZ2lEf8iqHrCWk-E",
+                    authDomain: "digipassport.firebaseapp.com",
+                    projectId: "digipassport",
+                    storageBucket: "digipassport.firebasestorage.app",
+                    messagingSenderId: "111979655077",
+                    appId: "1:111979655077:web:5e20fdbf0252c19c78424c"
+                };
                 
                 // This checks if we are in the AI preview environment or your real host
-                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : myFirebaseConfig;
+                const appConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : myFirebaseConfig;
                 appId = typeof __app_id !== 'undefined' ? __app_id : 'my-event-app-id';
                 
-                const app = initializeApp(firebaseConfig);
+                const app = initializeApp(appConfig);
                 auth = getAuth(app);
                 db = getFirestore(app);
 
